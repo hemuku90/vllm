@@ -19,6 +19,7 @@ def server():
         "2048",
         "--enforce-eager",
         "--enable-prompt-tokens-details",
+        "--enable-per-request-metrics",
         "--enable-auto-tool-choice",
         "--tool-call-parser",
         "hermes",
@@ -243,3 +244,50 @@ async def test_anthropic_streaming_cache_usage(client: anthropic.AsyncAnthropic)
     warm_usage = await get_stream_usage(await client.messages.create(**request))
     assert warm_usage.cache_read_input_tokens is not None
     assert warm_usage.cache_read_input_tokens > 0
+
+
+_TIMING_FIELDS = {
+    "time_to_first_token_ms",
+    "generation_time_ms",
+    "queue_time_ms",
+    "mean_itl_ms",
+    "tokens_per_second",
+}
+
+
+@pytest.mark.asyncio
+async def test_per_request_metrics_non_streaming(client: anthropic.AsyncAnthropic):
+    resp = await client.messages.create(
+        model="claude-3-7-sonnet-latest",
+        max_tokens=4,
+        messages=[{"role": "user", "content": "Count to four."}],
+        extra_body={"temperature": 0.0, "min_tokens": 4},
+    )
+
+    metrics = (resp.model_extra or {}).get("metrics")
+    assert isinstance(metrics, dict)
+    assert metrics.keys() >= _TIMING_FIELDS
+    assert all(metrics[field] >= 0 for field in _TIMING_FIELDS)
+
+
+@pytest.mark.asyncio
+async def test_per_request_metrics_only_on_final_message_delta(
+    client: anthropic.AsyncAnthropic,
+):
+    stream = await client.messages.create(
+        model="claude-3-7-sonnet-latest",
+        max_tokens=4,
+        messages=[{"role": "user", "content": "Count to four."}],
+        extra_body={"temperature": 0.0, "min_tokens": 4},
+        stream=True,
+    )
+
+    metrics_by_event = [
+        (event.type, (event.model_extra or {}).get("metrics"))
+        async for event in stream
+        if "metrics" in (event.model_extra or {})
+    ]
+    assert [event_type for event_type, _ in metrics_by_event] == ["message_delta"]
+    metrics = metrics_by_event[0][1]
+    assert isinstance(metrics, dict)
+    assert metrics.keys() >= _TIMING_FIELDS

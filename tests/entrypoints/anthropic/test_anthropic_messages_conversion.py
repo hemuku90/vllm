@@ -40,6 +40,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     DeltaToolCall,
     FunctionCall,
+    PerRequestMetrics,
     ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -1521,6 +1522,67 @@ class TestMessagesFullConverter:
         assert len(result.content) == 1
         assert result.content[0].type == "text"
         assert result.content[0].text == ""
+
+    @pytest.mark.parametrize(
+        "metrics", [None, PerRequestMetrics(time_to_first_token_ms=12.5)]
+    )
+    def test_per_request_metrics_passed_through(self, metrics):
+        """--enable-per-request-metrics output reaches /v1/messages and is
+        omitted from the serialized response when disabled."""
+        generator = ChatCompletionResponse(
+            id="chatcmpl-metrics",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hi"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+            metrics=metrics,
+        )
+
+        result = _make_full_converter().messages_full_converter(generator)
+        body = result.model_dump(exclude_none=True)
+
+        if metrics is None:
+            assert "metrics" not in body
+        else:
+            assert body["metrics"]["time_to_first_token_ms"] == 12.5
+
+
+class TestStreamingPerRequestMetrics:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "metrics", [None, PerRequestMetrics(time_to_first_token_ms=12.5)]
+    )
+    async def test_metrics_only_on_message_delta(self, metrics):
+        async def chunk_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant", content="hi"),
+                usage=UsageInfo(prompt_tokens=5, total_tokens=5),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            final = _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+            )
+            final.metrics = metrics
+            yield final
+
+        converter = _make_stream_converter()
+        output = [
+            event async for event in converter.message_stream_converter(chunk_input())
+        ]
+        events = _parse_sse_events(output)
+
+        with_metrics = {ev: data["metrics"] for ev, data in events if "metrics" in data}
+        if metrics is None:
+            assert with_metrics == {}
+        else:
+            assert list(with_metrics) == ["message_delta"]
+            assert with_metrics["message_delta"]["time_to_first_token_ms"] == 12.5
 
 
 # ======================================================================

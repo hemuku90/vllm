@@ -188,6 +188,7 @@ async def init_generate_state(
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
             enable_log_deltas=args.enable_log_deltas,
+            enable_per_request_metrics=args.enable_per_request_metrics,
             default_chat_template_kwargs=default_chat_template_kwargs,
             disabled_thinking_effort=args.anthropic_disabled_thinking_effort,
         )
