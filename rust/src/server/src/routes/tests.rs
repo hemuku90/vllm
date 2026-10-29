@@ -1722,6 +1722,30 @@ async fn render_list_models_reports_configured_max_model_len() {
     }
 }
 
+/// Like Python, `/v1/chat/completions/render` accepts empty user content and
+/// renders it the same as an empty text part.
+#[tokio::test]
+async fn render_chat_accepts_empty_user_content() {
+    let mut app = test_render_app();
+
+    let mut token_ids = Vec::new();
+    for content in [json!(""), json!([]), json!([{"type": "text", "text": ""}])] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "render-model",
+                "messages": [{"role": "user", "content": content}],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{content}: {json}");
+        token_ids.push(json["token_ids"].clone());
+    }
+    assert_eq!(token_ids[0], token_ids[2]);
+    assert_eq!(token_ids[1], token_ids[2]);
+}
+
 /// Like Python's `TokenizeParams` check, a requested output budget above the
 /// context window is a 400, while one that fits the window is accepted.
 #[tokio::test]
@@ -9002,23 +9026,29 @@ async fn tokenize_chat_empty_messages_returns_400() {
     assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
+/// Like Python, empty user content renders as an empty user turn in every
+/// content form instead of being rejected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn tokenize_chat_empty_message_content_returns_400() {
+async fn tokenize_chat_empty_message_content_renders_empty_turn() {
     let mut app = test_app().await;
 
-    let (status, json) = post_json(
-        &mut app,
-        "/tokenize",
-        json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": ""}],
-        }),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "BadRequestError");
+    let mut tokens = Vec::new();
+    for content in [json!(""), json!([]), json!([{"type": "text", "text": ""}])] {
+        let (status, json) = post_json(
+            &mut app,
+            "/tokenize",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": content}],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{content}: {json}");
+        tokens.push(json["tokens"].clone());
+    }
+    assert_eq!(tokens[0], tokens[2]);
+    assert_eq!(tokens[1], tokens[2]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
