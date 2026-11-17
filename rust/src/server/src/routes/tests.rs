@@ -1032,10 +1032,58 @@ async fn unimplemented_python_routes_return_not_implemented() {
         ("POST", "/v1/systemone"),
         ("POST", "/scale_elastic_ep"),
         ("POST", "/is_scaling_elastic_ep"),
-        ("POST", "/invocations"),
     ] {
         assert_route_not_supported(&app, method, uri, uri).await;
     }
+}
+
+/// SageMaker's `/invocations` serves a chat body as a chat completion and a
+/// prompt body as a completion, like Python.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn invocations_routes_by_request_shape() {
+    for (body, object, text) in [
+        (
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "messages": [{"role": "user", "content": "hello"}]}),
+            "chat.completion",
+            "/choices/0/message/content",
+        ),
+        (
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello"}),
+            "text_completion",
+            "/choices/0/text",
+        ),
+    ] {
+        let (mut app, engine_task) = test_app_with_engine_handle().await;
+        let (status, json) = post_json(&mut app, "/invocations", body).await;
+        engine_task.await.expect("mock engine task");
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["object"], object, "{json}");
+        assert_eq!(json.pointer(text), Some(&json!("hi")), "{json}");
+    }
+}
+
+/// When no request type fits, `/invocations` reports the error of the type
+/// the body was meant for, as that endpoint would, and a body that is not an
+/// object gets Python's "no suitable handler" error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn invocations_reports_the_intended_request_type_error() {
+    let (mut app, _engine_task) = test_app().await;
+
+    let mut errors = Vec::new();
+    for body in [
+        json!({"messages": [{"role": "user", "content": "hi"}], "stream_options": {"include_usage": true}}),
+        json!({"prompt": "hi", "stream_options": {"include_usage": true}}),
+        json!(["hi"]),
+    ] {
+        let (status, json) = post_json(&mut app, "/invocations", body.clone()).await;
+        errors.push(format!("{body} -> {status} {json}"));
+    }
+    expect_test::expect![[r#"
+        {"messages":[{"role":"user","content":"hi"}],"stream_options":{"include_usage":true}} -> 400 Bad Request {"error":{"message":"__all__: stream_options can only be used when stream is true","type":"BadRequestError","param":null,"code":400}}
+        {"prompt":"hi","stream_options":{"include_usage":true}} -> 400 Bad Request {"error":{"message":"stream_options are only supported when stream=true.","type":"BadRequestError","param":"stream_options","code":400}}
+        ["hi"] -> 400 Bad Request {"error":{"message":"Cannot find suitable handler for request. Expected one of: ['ChatCompletionRequest', 'CompletionRequest']","type":"BadRequestError","param":null,"code":400}}"#]].assert_eq(&errors.join("\n"));
 }
 
 /// Engine script for `/generative_scoring`: receive one add request per

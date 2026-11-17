@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use validator::Validate;
 
 use super::types::Normalizable;
-use crate::error::{ApiError, invalid_request};
+use crate::error::{ApiError, invalid_request, json_parse_error};
 
 /// A JSON extractor that automatically validates and normalizes the request
 /// body.
@@ -29,8 +29,22 @@ where
     type Rejection = ApiError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let Json(mut data) = Json::<T>::from_request(req, state).await?;
+        let Json(data) = Json::<T>::from_request(req, state).await?;
+        Self::validated(data)
+    }
+}
 
+impl<T: DeserializeOwned + Validate + Normalizable> ValidatedJson<T> {
+    /// Deserialize and validate an already-parsed JSON body, failing the same
+    /// way the extractor does.
+    pub(crate) fn from_value(value: serde_json::Value) -> Result<Self, ApiError> {
+        let data = serde_path_to_error::deserialize(value).map_err(|error| {
+            json_parse_error!("Failed to deserialize the JSON body into the target type: {error}")
+        })?;
+        Self::validated(data)
+    }
+
+    fn validated(mut data: T) -> Result<Self, ApiError> {
         data.normalize();
 
         data.validate()
